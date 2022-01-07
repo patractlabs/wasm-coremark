@@ -124,6 +124,41 @@ fn wasmi_coremark(b: &[u8]) -> f32 {
     }
 }
 
+fn wasmi_2_coremark(wasm: &[u8]) -> f32 {
+    use wasmi_2::{
+        v1::{Engine, Func, Linker, Module, Store, Extern},
+        RuntimeValue,
+        nan_preserving_float::F32,
+    };
+
+    let engine = Engine::default();
+    let mut store = Store::new(&engine, ());
+
+    let mut linker = <Linker<()>>::new();
+    let clock_ms = Func::wrap(&mut store, || clock_ms() as i32);
+    linker.define("env", "clock_ms", clock_ms)
+        .expect("failed to define `clock_ms` for wasmi v1");
+
+    let module = Module::new(&engine, wasm)
+        .expect("compiling and validating Wasm module failed in wasmi v1 coremark");
+    let instance = linker
+        .instantiate(&mut store, &module)
+        .expect("linking module core-mark failed in wasmi v1")
+        .ensure_no_start(&mut store)
+        .expect("failed to start module instance in wasmi v1");
+    let mut result = RuntimeValue::F32(F32::from(0.0));
+    let run = instance
+        .get_export(&store, "run")
+        .and_then(Extern::into_func)
+        .expect("could not find function `run` in the coremark `.wasm`");
+    run.call(&mut store, &[], core::slice::from_mut(&mut result))
+        .expect("failed running coremark in wasmi v1");
+    match result {
+        RuntimeValue::F32(value) => value.into(),
+        unexpected => panic!("wasmi v1 result expected `F32` but found: {:?}", unexpected),
+    }
+}
+
 fn main() {
     let args = std::env::args().collect::<Vec<String>>();
     let help = || println!("usage: {} [wasmtime|wasm3|wasmi: string]", args[0]);
@@ -142,6 +177,7 @@ fn main() {
                 "wasmtime" => println!("Result: {}", wasmtime_coremark(coremark_wasm)),
                 "wasm3" => println!("Result: {}", wasm3_coremark(coremark_wasm)),
                 "wasmi" => println!("Result: {}", wasmi_coremark(coremark_wasm)),
+                "wasmi2" => println!("Result: {}", wasmi_2_coremark(coremark_wasm)),
                 _ => help(),
             }
         }
