@@ -1,104 +1,73 @@
-/// ENV clock_ms
 fn clock_ms() -> u32 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Clock may have gone backwards")
-        .as_millis() as u32;
-    println!("clock_ms(): {now}");
-    now
+    use std::time::Instant;
+    static STARTED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let elapsed = STARTED.get_or_init(Instant::now).elapsed();
+    std::println!("clock_ms(): {elapsed:.2?}");
+    elapsed.as_millis() as u32
 }
 
-/// Wasmtime coremark
-fn wasmtime_coremark(b: &[u8]) -> f32 {
-    use core::slice;
-    use wasmtime::{Linker, Module, Store, Val};
-
-    let mut store = <Store<()>>::default();
+fn wasmtime_coremark(wasm: &[u8]) -> f32 {
+    let mut store = <wasmtime::Store<()>>::default();
     let engine = store.engine();
-    let mut linker = Linker::new(&engine);
-
+    let mut linker = wasmtime::Linker::new(engine);
     linker
-        .func_wrap("env", "clock_ms", || clock_ms())
-        .expect("Link clock_ms failed");
-    let module =
-        Module::new(store.engine(), b).expect("Init wasm module failed in wasmtime coremark");
-
-    let mut result = Val::F32(0);
+        .func_wrap("env", "clock_ms", clock_ms)
+        .expect("Wasmtime: failed to define `clock_ms` host function");
+    let module = wasmtime::Module::new(engine, wasm)
+        .expect("Wasmtime: failed to compile and validate coremark Wasm binary");
     linker
         .instantiate(&mut store, &module)
-        .expect("Link module core-mark failed")
-        .get_func(&mut store, "run")
-        .expect("Could not find function `run` in the coremark")
-        .call(&mut store, &[], slice::from_mut(&mut result))
-        .expect("Failed running coremark in wasmtime");
-    match result {
-        Val::F32(bits) => f32::from_bits(bits),
-        _ => panic!(
-            "failed running coremark using Wasmtime. expected F32 result but got: {:?}",
-            result
-        ),
-    }
+        .expect("Wasmtime: failed to instantiate coremark Wasm module")
+        .get_typed_func::<(), f32>(&mut store, "run")
+        .expect("Wasmtime: could not find \"run\" function export")
+        .call(&mut store, ())
+        .expect("Wasmtime: failed to execute \"run\" function")
 }
-
-/// Wasm3 coremark
-fn wasm3_coremark(b: &[u8]) -> f32 {
-    use wasm3::{Environment, Module};
-
-    let env = Environment::new().expect("Unable to create environment");
-    let rt = env.create_runtime(2048).expect("Unable to create runtime");
-    let mut module = rt
-        .load_module(Module::parse(&env, &b[..]).expect("Unable to parse module"))
-        .expect("Unable to load module");
-
-    module
-        .link_function::<(), u32>("env", "clock_ms", clock_ms_wrap)
-        .expect("Unable to link function");
-
-    module
-        .find_function::<(), f32>("run")
-        .expect("Unable to find function")
-        .call()
-        .expect("Calling coremark failed in wasm3")
-}
-
-wasm3::make_func_wrapper!(clock_ms_wrap: clock_ms() -> u32);
 
 fn wasmi_coremark(wasm: &[u8]) -> f32 {
-    use core::slice;
-    use wasmi::{
-        core::{F32},
-        Value,
-        Engine, Extern, Func, Linker, Module, Store,
-    };
-
-    let engine = Engine::default();
-    let mut store = Store::new(&engine, ());
-    let mut linker = <Linker<()>>::new(&engine);
-    let clock_ms = Func::wrap(&mut store, || clock_ms() as i32);
+    use wasmi::core::F32;
+    let config = wasmi::Config::default();
+    let engine = wasmi::Engine::new(&config);
+    let mut store = wasmi::Store::new(&engine, ());
+    let mut linker = <wasmi::Linker<()>>::new(&engine);
     linker
-        .define("env", "clock_ms", clock_ms)
-        .expect("failed to define `clock_ms` for wasmi");
-
-    let module = Module::new(&engine, wasm)
-        .expect("compiling and validating Wasm module failed in wasmi coremark");
-    let instance = linker
+        .func_wrap("env", "clock_ms", clock_ms)
+        .expect("Wasmi: failed to define `clock_ms` host function");
+    let module = wasmi::Module::new(&engine, wasm)
+        .expect("Wasmi: failed to compile and validate coremark Wasm binary");
+    let result = linker
         .instantiate(&mut store, &module)
-        .expect("linking module core-mark failed in wasmi")
+        .expect("Wasmi: failed to instantiate coremark Wasm module")
         .ensure_no_start(&mut store)
-        .expect("failed to start module instance in wasmi");
-    let mut result = Value::F32(F32::from(0.0));
-    let run = instance
-        .get_export(&store, "run")
-        .and_then(Extern::into_func)
-        .expect("could not find function `run` in the coremark `.wasm`");
-    run.call(&mut store, &[], slice::from_mut(&mut result))
-        .expect("failed running coremark in wasmi");
-    match result {
-        Value::F32(value) => value.into(),
-        unexpected => panic!("wasmi result expected `F32` but found: {:?}", unexpected),
-    }
+        .expect("Wasmi: failed to start Wasm module instance")
+        .get_typed_func::<(), F32>(&mut store, "run")
+        .expect("Wasmi: could not find \"run\" function export")
+        .call(&mut store, ())
+        .expect("Wasmi: failed to execute \"run\" function");
+    result.into()
 }
+
+fn wasm3_coremark(wasm: &[u8]) -> f32 {
+    use wasm3::{Environment, Module};
+
+    let env = Environment::new().expect("Wasm3: failed to create execution environment");
+    let rt = env
+        .create_runtime(2048)
+        .expect("Wasm3: failed to create runtime");
+    let mut module = rt
+        .load_module(Module::parse(&env, wasm).expect("Wasm3: failed to parse Wasm module"))
+        .expect("Wasm: failed to parse coremark Wasm module");
+    module
+        .link_closure::<(), u32, _>("env", "clock_ms", |_ctx, _args| Ok(clock_ms()))
+        .expect("Wasm3: failed to link \"clock_ms\" function");
+    module
+        .find_function::<(), f32>("run")
+        .expect("Wasm3: failed to find exported \"run\" function in Wasm module instance")
+        .call()
+        .expect("Wasm3: failed to call \"run\" function")
+}
+
+// wasm3::make_func_wrapper!(clock_ms_wrap: clock_ms() -> u32);
 
 fn main() {
     let args = std::env::args().collect::<Vec<String>>();
