@@ -67,8 +67,6 @@ fn wasm3_coremark(wasm: &[u8]) -> f32 {
         .expect("Wasm3: failed to call \"run\" function")
 }
 
-// wasm3::make_func_wrapper!(clock_ms_wrap: clock_ms() -> u32);
-
 fn main() {
     let args = std::env::args().collect::<Vec<String>>();
     let help = || println!("usage: {} [wasmtime|wasm3|wasmi: string]", args[0]);
